@@ -1,0 +1,180 @@
+// STM32 USART2 op PA3 = RX, PA2 = TX
+HardwareSerial inirSerial(PA3, PA2);
+
+const int sensorPin = PA0;
+const int numSamples = 20;
+
+unsigned long lastRequestTime = 0;
+const unsigned long REQUEST_INTERVAL = 3000;  // 3 seconden
+
+void flushSerialBuffer(HardwareSerial &serial) {
+  while (serial.available()) {
+    serial.read();  // Weggooien van oude data
+  }
+}
+
+
+// Gemiddelde ADC waarde lezen (voor analoge sensorpin)
+float readAverageADC() {
+  long sum = 0;
+  for (int i = 0; i < numSamples; i++) {
+    sum += analogRead(sensorPin);
+    delay(2);  // korte delay voor stabielere meting
+  }
+  return sum / (float)numSamples;
+}
+
+// Struct om sensorwaarden op te slaan
+typedef struct {
+  uint32_t start_char;
+  uint32_t gas_concentration;
+  uint32_t faults;
+  uint32_t sensor_temp;
+  uint32_t ref_1s_avg;
+  uint32_t active_1s_avg;
+  uint32_t crc;
+  uint32_t crc_complement;
+  uint32_t end_char;
+  float temperature_kelvin;
+  float temperature_celsius;
+} SensorDataFrame_t;
+
+SensorDataFrame_t myData;
+
+#define MAX_LINES 9
+#define LINE_LENGTH 20
+
+String lines[MAX_LINES];
+int lineIndex = 0;
+
+char lineBuffer[LINE_LENGTH];
+int charIndex = 0;
+
+bool frameStarted = false;
+
+void setup() {
+  pinMode(sensorPin, INPUT_ANALOG);
+  Serial.begin(9600);       // USB debug
+  inirSerial.begin(38400);  // Sensor UART (PA3, PA2)
+
+  Serial.println("Initialiseren INIR sensor...");
+  sendCommand('C');  // Configuratiemodus
+  waitAck();
+  sendCommand('H');  // On-demand mode
+  waitAck();
+  Serial.println("Heating up the sensor");
+  delay(45000);
+  Serial.println("Emptieng... INIR2 CD100 buffer");
+  flushSerialBuffer(inirSerial);
+  Serial.println("Sensor staat in meetmodus (On-demand mode).");
+}
+
+// Hulp: stuur commando naar sensor
+void sendCommand(char cmd) {
+  String command = "[" + String(cmd) + "]";
+  inirSerial.print(command);
+  Serial.println(">> Stuur: " + command);
+}
+
+// Hulp: wacht op antwoord (ACK)
+void waitAck() {
+  String response = "";
+  unsigned long start = millis();
+
+  while (millis() - start < 2000) {
+    if (inirSerial.available()) {
+      char c = inirSerial.read();
+      response += c;
+      if (c == ']') break;
+    }
+  }
+
+  response.trim();
+  Serial.println("<< Antwoord: " + response);
+}
+
+// MAIN LOOP
+void loop() {
+  static int lineIndex = 0;
+  static String lines[9];
+
+  if (millis() - lastRequestTime >= REQUEST_INTERVAL) {
+  flushSerialBuffer(inirSerial);  // Gooi oude data weg
+  sendCommand('Q');
+  waitAck();
+  lastRequestTime = millis();
+}
+
+  if (inirSerial.available()) {
+    String line = inirSerial.readStringUntil('\n');
+    line.trim();
+
+    if (line.length() == 0) return;
+    // Debug
+    Serial.println("RX: " + line);
+
+    // Filter op incomplete regels
+    if (line.length() < 8) {
+      Serial.println("Incomplete regel ontvangen, genegeerd: " + line);
+      return;
+    }
+
+    if (lineIndex < 9) {
+      lines[lineIndex++] = line;
+    }
+
+    if (lineIndex == 9) {
+      if (lines[0] == "0000005b" && lines[8] == "0000005d") {
+        updateSensorData(lines);
+      } else {
+        Serial.println("ongeldig frame ontvangen:");
+        for (int i = 0; i < 9; i++) {
+          Serial.println(" [" + String(i) + "] " + lines[i]);
+        }
+      }
+      lineIndex = 0;
+    }
+  }
+}
+
+
+
+
+// Verwerk ontvangen hex-regels in struct en converteer temperatuur
+void updateSensorData(String lines[]) {
+  myData.start_char = strtoul(lines[0].c_str(), NULL, 16);
+  myData.gas_concentration = strtoul(lines[1].c_str(), NULL, 16);
+  myData.faults = strtoul(lines[2].c_str(), NULL, 16);
+  myData.sensor_temp = strtoul(lines[3].c_str(), NULL, 16);
+  myData.ref_1s_avg = strtoul(lines[4].c_str(), NULL, 16);
+  myData.active_1s_avg = strtoul(lines[5].c_str(), NULL, 16);
+  myData.crc = strtoul(lines[6].c_str(), NULL, 16);
+  myData.crc_complement = strtoul(lines[7].c_str(), NULL, 16);
+  myData.end_char = strtoul(lines[8].c_str(), NULL, 16);
+
+  // Temperatuur omrekenen (Kelvin*10 naar Kelvin en Celsius)
+  myData.temperature_kelvin = myData.sensor_temp / 10.0f;
+  myData.temperature_celsius = myData.temperature_kelvin - 273.15f;
+
+  // Debug overzicht
+  Serial.println("------ SensorDataFrame ---------");
+  Serial.print("Gas concentratie: ");
+  Serial.println(myData.gas_concentration);
+  Serial.print("Fouten:           0x");
+  Serial.println(myData.faults, HEX);
+  Serial.print("Temp (raw):       ");
+  Serial.println(myData.sensor_temp);
+  Serial.print("Temp (K):         ");
+  Serial.println(myData.temperature_kelvin, 1);
+  Serial.print("Temp (°C):        ");
+  Serial.println(myData.temperature_celsius, 2);
+  Serial.print("Ref avg:          ");
+  Serial.println(myData.ref_1s_avg);
+  Serial.print("Actief avg:       ");
+  Serial.println(myData.active_1s_avg);
+  Serial.print("CRC:              0x");
+  Serial.println(myData.crc, HEX);
+  Serial.print("CRC ~:            0x");
+  Serial.println(myData.crc_complement, HEX);
+  Serial.println("--------------------------------");
+}

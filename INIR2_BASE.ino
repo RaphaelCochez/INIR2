@@ -1,3 +1,4 @@
+#include <Arduino.h>
 // STM32 USART2 op PA3 = RX, PA2 = TX
 HardwareSerial inirSerial(PA3, PA2);  // RX, TX = USART2
 
